@@ -1419,6 +1419,9 @@ func (p *Peer) setNextAddrFromErr(err error, req *Request, source []string) {
 		return
 	}
 
+	// if lmd is started in the import mode, the imported file may have unreachable peers in current execution environment
+	// passthrough tables like 'log' fail their queries due to unreachable peers, ignore their errors and return early
+	// otherwise the peer is set to down, and their data is removed
 	if p.lmd.flags.flagImport != "" {
 		return
 	}

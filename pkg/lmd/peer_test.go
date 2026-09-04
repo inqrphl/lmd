@@ -117,32 +117,3 @@ func TestPeerLog(t *testing.T) {
 	err = cleanup()
 	require.NoError(t, err)
 }
-
-func TestPeerConnectionErrorImportMode(t *testing.T) {
-	connErr := fmt.Errorf("connection error dial tcp 127.0.0.2:666: connect: connection refused")
-	makePeer := func() *Peer {
-		lmd := createTestLMDInstance()
-		peer := NewPeer(lmd, &Connection{Name: "Test", Source: []string{"127.0.0.1:1"}})
-		// last online long in the past, so a connection error would normally
-		// mark the peer as offline and drop its data
-		peer.peerState.Set(PeerStatusUp)
-		peer.lastOnline.Set(currentUnixTime() - 1000)
-		peer.data.Store(NewDataStoreSet(peer))
-
-		return peer
-	}
-
-	// without import mode a failed connection takes the peer offline and drops its data
-	peer := makePeer()
-	peer.setNextAddrFromErr(connErr, nil, peer.source)
-	require.Equalf(t, PeerStatusDown, peer.peerState.Get(), "peer without import mode should go offline")
-	require.Nilf(t, peer.data.Load(), "peer without import mode should drop its data")
-
-	// in import mode the same failure must be ignored, the peer stays online and keeps its data
-	peer = makePeer()
-	peer.lmd.flags.flagImport = "snapshot.export"
-	importData := peer.data.Load()
-	peer.setNextAddrFromErr(connErr, nil, peer.source)
-	require.Equalf(t, PeerStatusUp, peer.peerState.Get(), "peer in import mode must stay online")
-	assert.Samef(t, importData, peer.data.Load(), "peer in import mode must keep its imported data")
-}

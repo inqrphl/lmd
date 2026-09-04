@@ -226,7 +226,8 @@ func (lmd *Daemon) setFlags() {
 	flag.IntVar(&lmd.flags.flagDeadlock, "debug-deadlock", 0, "enable deadlock detection with given timeout")
 	flag.Var(&lmd.flags.flagCfgOption, "o", "override settings, ex.: -o Listen=:3333 -o Connections=name,address")
 	flag.StringVar(&lmd.flags.flagExport, "export", "", "export/snapshot data to file.")
-	flag.StringVar(&lmd.flags.flagImport, "import", "", "start lmd from export/snapshot and do not contact backends.")
+	flag.StringVar(&lmd.flags.flagImport, "import", "", "start lmd from export/snapshot and do not contact backends; "+
+		" failed connections are ignored and will not drop the imported data.")
 }
 
 var Build string

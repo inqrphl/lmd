@@ -1418,6 +1418,11 @@ func (p *Peer) setNextAddrFromErr(err error, req *Request, source []string) {
 		// client errors do not affect remote site status
 		return
 	}
+
+	if p.lmd.flags.flagImport != "" {
+		return
+	}
+
 	promPeerFailedConnections.WithLabelValues(p.Name).Inc()
 
 	peerState := p.peerState.Get()

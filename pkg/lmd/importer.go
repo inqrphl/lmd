@@ -61,6 +61,7 @@ func initializePeersWithImport(lmd *Daemon, importFile string) (err error) {
 	}
 
 	log.Infof("imported %d peers successfully", len(newPeers))
+	log.Infof("running in import/snapshot mode: imported peers keep their data, failed backend connections are ignored and will not mark peers offline")
 
 	lmd.nodeAccessor = NewNodes(lmd, []string{}, "")
 

@@ -15,6 +15,7 @@ import (
 )
 
 var reImportFileTable = regexp.MustCompile(`/([a-z]+)\.json$`)
+var reImportTarFile = regexp.MustCompile(`^sites/([^/]+)/([a-z]+)\.json$`)
 
 func initializePeersWithImport(lmd *Daemon, importFile string) (err error) {
 	stat, err := os.Stat(importFile)
@@ -151,17 +152,17 @@ func importPeerFromFile(peers []*Peer, filename string, lmd *Daemon) ([]*Peer, e
 	return importData(peers, table, rows, columns, lmd)
 }
 
-// importPeersFromTar imports all peers from tarball.
-func importPeersFromTar(lmd *Daemon, tarFile string) (peers []*Peer, err error) {
+// scanImportTar calls fn callback for every regular file in the tarball.
+func scanImportTar(tarFile string, fn func(header *tar.Header, tarReader io.Reader) error) error {
 	file, err := os.Open(tarFile)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read %s: %s", tarFile, err.Error())
+		return fmt.Errorf("cannot read %s: %s", tarFile, err.Error())
 	}
 	defer file.Close()
 
 	gzf, err := gzip.NewReader(file)
 	if err != nil {
-		return nil, fmt.Errorf("gzip error %s: %s", tarFile, err.Error())
+		return fmt.Errorf("gzip error %s: %s", tarFile, err.Error())
 	}
 
 	tarReader := tar.NewReader(gzf)
@@ -173,19 +174,90 @@ func importPeersFromTar(lmd *Daemon, tarFile string) (peers []*Peer, err error) 
 		}
 
 		if err != nil {
-			return nil, fmt.Errorf("gzip/tarball error %s: %s", tarFile, err.Error())
+			return fmt.Errorf("gzip/tarball error %s: %s", tarFile, err.Error())
 		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
 		case tar.TypeReg:
-			peers, err = importPeerFromTar(peers, header, tarReader, lmd)
-			if err != nil {
-				return nil, fmt.Errorf("gzip/tarball error %s in file %s: %s", tarFile, header.Name, err.Error())
+			if err := fn(header, tarReader); err != nil {
+				return fmt.Errorf("gzip/tarball error %s in file %s: %s", tarFile, header.Name, err.Error())
 			}
 		default:
-			return nil, fmt.Errorf("gzip/tarball error %s: unsupported type in file %s: %c", tarFile, header.Name, header.Typeflag)
+			return fmt.Errorf("gzip/tarball error %s: unsupported type in file %s: %c", tarFile, header.Name, header.Typeflag)
 		}
+	}
+
+	return nil
+}
+
+// importTarFileNames returns peer id and table name for a file inside an export archive.
+func importTarFileNames(filename string) (string, string, error) {
+	matches := reImportTarFile.FindStringSubmatch(filename)
+	if len(matches) != 3 {
+		return "", "", fmt.Errorf("unexpected file in export archive, expected sites/<peer_id>/<table>.json: %s", filename)
+	}
+
+	return matches[1], matches[2], nil
+}
+
+// importPeersFromTar imports all peers from tarball.
+func importPeersFromTar(lmd *Daemon, tarFile string) (peers []*Peer, err error) {
+	backendsTableName := Objects.Tables[TableBackends].name.String()
+	peersByID := make(map[string]*Peer)
+
+	// first pass: create all peers from their backends.json
+	err = scanImportTar(tarFile, func(header *tar.Header, tarReader io.Reader) error {
+		peerID, tableName, err := importTarFileNames(header.Name)
+		if err != nil {
+			return err
+		}
+		if tableName != backendsTableName {
+			return nil
+		}
+		newPeers, err := importPeerFromTar(nil, header, tarReader, lmd)
+		if err != nil {
+			return err
+		}
+		if len(newPeers) != 1 {
+			return fmt.Errorf("failed to restore peer from %s", header.Name)
+		}
+		if peersByID[peerID] != nil {
+			return fmt.Errorf("duplicate peer id: %s", peerID)
+		}
+		peersByID[peerID] = newPeers[0]
+		peers = append(peers, newPeers[0])
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	if len(peers) == 0 {
+		return nil, fmt.Errorf("no %s.json found in %s", backendsTableName, tarFile)
+	}
+
+	// second pass: import all other tables
+	err = scanImportTar(tarFile, func(header *tar.Header, tarReader io.Reader) error {
+		peerID, tableName, err := importTarFileNames(header.Name)
+		if err != nil {
+			return err
+		}
+		if tableName == backendsTableName {
+			return nil
+		}
+		peer := peersByID[peerID]
+		if peer == nil {
+			return fmt.Errorf("no %s.json found for peer %s", backendsTableName, peerID)
+		}
+		_, err = importPeerFromTar([]*Peer{peer}, header, tarReader, lmd)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return peers, nil
@@ -195,11 +267,11 @@ func importPeersFromTar(lmd *Daemon, tarFile string) (peers []*Peer, err error) 
 func importPeerFromTar(peers []*Peer, header *tar.Header, tarReader io.Reader, lmd *Daemon) ([]*Peer, error) {
 	filename := header.Name
 	log.Debugf("reading %s", filename)
-	matches := reImportFileTable.FindStringSubmatch(filename)
-	if len(matches) != 2 {
-		return nil, fmt.Errorf("no idea what to do with file: %s", filename)
+	_, tableName, err := importTarFileNames(filename)
+	if err != nil {
+		return nil, err
 	}
-	table, rows, columns, err := importReadFile(matches[1], tarReader, header.Size)
+	table, rows, columns, err := importReadFile(tableName, tarReader, header.Size)
 	if err != nil {
 		return nil, fmt.Errorf("import error: %s", err.Error())
 	}
@@ -252,7 +324,11 @@ func importData(peers []*Peer, table *Table, rows ResultSet, columns []string, l
 		return peers, nil
 	}
 
-	if peer != nil && peer.isOnline() {
+	if peer == nil {
+		return peers, fmt.Errorf("missing backends.json before table %s", table.name.String())
+	}
+
+	if peer.isOnline() {
 		store := NewDataStore(table, peer)
 		store.dataSet = peer.data.Load()
 		columnsList := ColumnList{}
